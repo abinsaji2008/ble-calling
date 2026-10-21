@@ -8,6 +8,7 @@ Android companion app for an ESP32-S3 Smart Patient Assistant. The ESP32-S3 send
 - BLE GATT client scans for a configured ESP32-S3 service and subscribes to its command characteristic.
 - Configurable trusted phone-number allowlist (E.164 format, e.g. `+919876543210`).
 - Optional auto-call toggle; requires the user to grant `CALL_PHONE` permission.
+- Requests Android to start outgoing calls with the phone's built-in speakerphone enabled.
 - Displays connection and last command status.
 - GitHub Actions builds a debug APK artifact.
 
@@ -31,7 +32,7 @@ Or push to GitHub and open **Actions → Build Android APK**. The workflow uploa
 5. Enable automatic calling only after testing commands and confirming the displayed number.
 6. Send `CALL:<approved-number>` from the ESP32-S3.
 
-The app requires the process to be running and BLE connected. Background execution, lock-screen behavior, and auto-call permissions differ by Android version and device vendor. The example does not guarantee background or unattended emergency calling.
+The app requires the process to be running and BLE connected. Background execution, lock-screen behavior, and auto-call permissions differ by Android version and device vendor. The app requests speakerphone mode through Android Telecom call extras, but Android or a carrier/device implementation may ignore this request; verify it on the target phone. The example does not guarantee background or unattended emergency calling.
 
 ## Hardware
 ESP32-S3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP. Use BLE GATT for this app.
