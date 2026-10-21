@@ -2,12 +2,20 @@ package com.abinsaji.blecalling
 
 import android.Manifest
 import android.app.Activity
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.companion.AssociationRequest
+import android.companion.BluetoothLeDeviceFilter
+import android.companion.CompanionDeviceManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelUuid
 import android.telecom.TelecomManager
 import android.widget.Button
 import android.widget.EditText
@@ -29,6 +37,10 @@ class MainActivity : Activity() {
     private val requestBlePermissionsCode = 202
     private val requestCallPermissionCode = 203
     private val requestNotificationPermissionCode = 204
+
+    companion object {
+        private const val SELECT_ESP32_REQUEST_CODE = 5142
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,11 +171,17 @@ class MainActivity : Activity() {
     }
 
     private fun requestBlePermissionsThenStart() {
-        val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            // Android 8–11: Android's Companion Device Manager finds the ESP32 on behalf of the app.
+            // This avoids requesting the app's Location permission.
+            pairWithEsp32WithoutLocationPermission()
+            return
         }
+
+        val required = arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT
+        )
         val missing = required.filter {
             checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
@@ -171,6 +189,81 @@ class MainActivity : Activity() {
             requestPermissions(missing.toTypedArray(), requestBlePermissionsCode)
             return
         }
+        startBackgroundBleService()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun pairWithEsp32WithoutLocationPermission() {
+        try {
+            val manager = getSystemService(Context.COMPANION_DEVICE_SERVICE) as CompanionDeviceManager
+            val bleFilter = BluetoothLeDeviceFilter.Builder()
+                .setScanFilter(
+                    ScanFilter.Builder()
+                        .setServiceUuid(ParcelUuid(BleConfig.SERVICE_UUID))
+                        .build()
+                )
+                .build()
+            val request = AssociationRequest.Builder()
+                .addDeviceFilter(bleFilter)
+                .setSingleDevice(true)
+                .build()
+
+            statusLabel.text = "Choose ESP32S3-PatientCall in Android's device picker. App location permission is not used."
+            manager.associate(request, object : CompanionDeviceManager.Callback() {
+                override fun onDeviceFound(chooserLauncher: IntentSender) {
+                    runOnUiThread {
+                        try {
+                            startIntentSenderForResult(
+                                chooserLauncher,
+                                SELECT_ESP32_REQUEST_CODE,
+                                null,
+                                0, 0, 0
+                            )
+                        } catch (e: IntentSender.SendIntentException) {
+                            statusLabel.text = "Could not open Bluetooth device picker: " +
+                                (e.message ?: e.javaClass.simpleName)
+                        }
+                    }
+                }
+
+                override fun onFailure(error: CharSequence?) {
+                    runOnUiThread {
+                        statusLabel.text = "ESP32-S3 not found. Check Bluetooth and make sure Location Services are ON; no app location permission is needed. " +
+                            (error?.toString() ?: "")
+                    }
+                }
+            }, null)
+        } catch (e: Exception) {
+            statusLabel.text = "Could not search for ESP32-S3: " +
+                (e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != SELECT_ESP32_REQUEST_CODE) return
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            statusLabel.text = "ESP32-S3 selection cancelled."
+            return
+        }
+
+        val selectedExtra = data.getParcelableExtra<android.os.Parcelable>(
+            CompanionDeviceManager.EXTRA_DEVICE
+        )
+        val device = when (selectedExtra) {
+            is ScanResult -> selectedExtra.device
+            is BluetoothDevice -> selectedExtra
+            else -> null
+        }
+
+        if (device == null) {
+            statusLabel.text = "Android did not return the selected BLE device. Tap Connect and try again."
+            return
+        }
+
+        prefs.edit().putString("ble_device_address", device.address).apply()
+        statusLabel.text = "Selected ESP32-S3 (${device.address}). Starting BLE service…"
         startBackgroundBleService()
     }
 

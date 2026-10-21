@@ -142,13 +142,25 @@ class BleCallService : Service() {
             checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
                 checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         } else {
-            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            // Legacy Bluetooth permissions are install-time permissions. Discovery uses
+            // CompanionDeviceManager from the activity, so location permission is unnecessary.
+            true
         }
 
     private fun beginScan() {
         if (isStopping || connected || connecting || scanning) return
         if (!hasBluetoothPermissions()) {
             updateNotification("Bluetooth permission missing. Open the app and grant it.")
+            return
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            val savedAddress = prefs.getString("ble_device_address", null)
+            if (savedAddress.isNullOrBlank()) {
+                updateNotification("Open Patient Call Bridge and tap Connect to choose the ESP32-S3. App location permission is not needed.")
+                return
+            }
+            connectToSavedDevice(savedAddress)
             return
         }
 
@@ -172,6 +184,28 @@ class BleCallService : Service() {
         } catch (_: Exception) {
             scanning = false
             updateNotification("BLE scan failed. Retrying…")
+            handler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
+        }
+    }
+
+    private fun connectToSavedDevice(address: String) {
+        if (isStopping || connected || connecting) return
+        val adapter = try { bluetoothAdapter } catch (_: SecurityException) { null }
+        if (adapter == null || !adapter.isEnabled) {
+            updateNotification("Bluetooth is off. Turn it on to reconnect to ESP32-S3.")
+            handler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
+            return
+        }
+
+        try {
+            val device = adapter.getRemoteDevice(address)
+            connecting = true
+            updateNotification("Connecting to saved ESP32-S3…")
+            bluetoothGatt?.close()
+            bluetoothGatt = device.connectGatt(this, false, gattCallback)
+        } catch (e: Exception) {
+            connecting = false
+            updateNotification("Could not connect to saved ESP32-S3. Retrying…")
             handler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
         }
     }

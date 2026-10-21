@@ -35,3 +35,7 @@ The app requires the process to be running and BLE connected. Background executi
 
 ## Hardware
 ESP32-S3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP. Use BLE GATT for this app.
+
+
+## Location permission
+The app does not request or use the phone's location permission. On Android 8–11, it uses Android Companion Device Manager's system picker for the initial ESP32-S3 selection, then connects to the saved BLE address. Android may still require the system Location Services switch to be enabled for Companion Device Manager scanning, but the app does not receive location permission. On Android 12+, the app requests only Nearby Devices permissions for BLE scanning/connection.
