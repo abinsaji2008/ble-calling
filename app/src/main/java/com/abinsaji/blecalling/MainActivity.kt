@@ -2,51 +2,36 @@ package com.abinsaji.blecalling
 
 import android.Manifest
 import android.app.Activity
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.telecom.TelecomManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import java.util.UUID
 
 class MainActivity : Activity() {
-    private lateinit var status: TextView
     private lateinit var numberInput: EditText
-    private lateinit var trustedInput: EditText
+    private lateinit var trustedLabel: TextView
     private lateinit var autoCallButton: Button
-    private var bluetoothGatt: BluetoothGatt? = null
-    private var commandCharacteristic: BluetoothGattCharacteristic? = null
+    private lateinit var statusLabel: TextView
+
     private var autoCall = false
     private val trustedNumbers = linkedSetOf<String>()
     private val prefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
 
-    private val callPermissionRequest = 201
-    private val bluetoothPermissionRequest = 202
-
-    private val adapter: BluetoothAdapter? by lazy {
-        (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
-    }
+    private val requestBlePermissionsCode = 202
+    private val requestCallPermissionCode = 203
+    private val requestNotificationPermissionCode = 204
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         autoCall = prefs.getBoolean("autocall", false)
         trustedNumbers.addAll(prefs.getStringSet("trusted", emptySet()) ?: emptySet())
 
@@ -56,13 +41,19 @@ class MainActivity : Activity() {
         }
         root.addView(TextView(this).apply {
             text = "Patient Call Bridge"
-            textSize = 24f
+            textSize = 25f
         })
-        status = TextView(this).apply {
-            text = "Status: disconnected"
-            textSize = 16f
+        root.addView(TextView(this).apply {
+            text = "Connect to the ESP32-S3 once. The foreground BLE service keeps the connection active while you use other apps."
+            textSize = 15f
+            setPadding(0, 12, 0, 12)
+        })
+
+        statusLabel = TextView(this).apply {
+            text = "Tap Connect to start background BLE monitoring."
+            textSize = 15f
         }
-        root.addView(status)
+        root.addView(statusLabel)
 
         numberInput = EditText(this).apply {
             hint = "Trusted number, e.g. +919876543210"
@@ -75,11 +66,11 @@ class MainActivity : Activity() {
             setOnClickListener { addTrustedNumber() }
         })
 
-        trustedInput = EditText(this).apply {
-            isFocusable = false
-            isClickable = false
+        trustedLabel = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, 8, 0, 12)
         }
-        root.addView(trustedInput)
+        root.addView(trustedLabel)
 
         autoCallButton = Button(this).apply {
             text = if (autoCall) "Auto-call: ON" else "Auto-call: OFF"
@@ -88,8 +79,17 @@ class MainActivity : Activity() {
         root.addView(autoCallButton)
 
         root.addView(Button(this).apply {
-            text = "Connect to ESP32-S3"
-            setOnClickListener { startScan() }
+            text = "Connect / keep BLE running"
+            setOnClickListener { requestBlePermissionsThenStart() }
+        })
+
+        root.addView(Button(this).apply {
+            text = "Stop BLE connection"
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, BleCallService::class.java))
+                statusLabel.text = "BLE background service stopped."
+                toast("BLE connection stopped")
+            }
         })
 
         root.addView(Button(this).apply {
@@ -97,19 +97,30 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val number = normalizeNumber(numberInput.text.toString())
                 if (number !in trustedNumbers) {
-                    toast("Add this number to trusted numbers first")
+                    toast("Add the number to trusted numbers first")
                 } else {
                     placeCall(number)
                 }
             }
         })
 
+        root.addView(TextView(this).apply {
+            text = "Keep the ongoing Patient Call Bridge notification visible. On Redmi, set Battery saver to No restrictions and enable Autostart if available. Force-stop will stop background monitoring."
+            textSize = 13f
+            setPadding(0, 16, 0, 0)
+        })
+
         setContentView(ScrollView(this).apply { addView(root) })
         refreshTrustedLabel()
-        requestCallPermissionIfNeeded()
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), requestNotificationPermissionCode)
+        }
     }
 
-    private fun normalizeNumber(raw: String): String = raw.trim().replace(" ", "").replace("-", "")
+    private fun normalizeNumber(raw: String): String =
+        raw.trim().replace(" ", "").replace("-", "")
 
     private fun isValidNumber(number: String): Boolean =
         number.matches(Regex("^\\+[1-9][0-9]{7,14}$"))
@@ -117,7 +128,7 @@ class MainActivity : Activity() {
     private fun addTrustedNumber() {
         val number = normalizeNumber(numberInput.text.toString())
         if (!isValidNumber(number)) {
-            toast("Enter a valid international number, e.g. +919876543210")
+            toast("Enter an international number such as +919876543210")
             return
         }
         trustedNumbers.add(number)
@@ -127,16 +138,18 @@ class MainActivity : Activity() {
     }
 
     private fun refreshTrustedLabel() {
-        trustedInput.setText(
-            if (trustedNumbers.isEmpty()) "Trusted numbers: none"
-            else "Trusted numbers: " + trustedNumbers.joinToString()
-        )
+        trustedLabel.text = if (trustedNumbers.isEmpty()) {
+            "Trusted numbers: none"
+        } else {
+            "Trusted numbers:\n" + trustedNumbers.joinToString("\n")
+        }
     }
 
     private fun toggleAutoCall() {
-        if (!autoCall && checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), callPermissionRequest)
-            toast("Grant Phone permission, then enable auto-call")
+        if (!autoCall &&
+            checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), requestCallPermissionCode)
+            toast("Grant Phone permission, then tap Auto-call again")
             return
         }
         autoCall = !autoCall
@@ -145,235 +158,83 @@ class MainActivity : Activity() {
         toast(if (autoCall) "Auto-call enabled" else "Auto-call disabled")
     }
 
-    private fun requestCallPermissionIfNeeded() {
-        if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), callPermissionRequest)
-        }
-    }
-
-    private fun hasBluetoothPermissions(): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+    private fun requestBlePermissionsThenStart() {
+        val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
-    private fun startScan() {
-        if (!hasBluetoothPermissions()) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                requestPermissions(
-                    arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT),
-                    bluetoothPermissionRequest
-                )
-            } else {
-                requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), bluetoothPermissionRequest)
-            }
+        val missing = required.filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), requestBlePermissionsCode)
             return
         }
+        startBackgroundBleService()
+    }
 
-        val scanner = adapter?.bluetoothLeScanner
-        if (scanner == null) {
-            status.text = "Status: Bluetooth unavailable or switched off"
-            return
-        }
-
-        status.text = "Status: scanning for ESP32-S3…"
+    private fun startBackgroundBleService() {
         try {
-            scanner.startScan(scanCallback)
-        } catch (_: SecurityException) {
-            status.text = "Status: Bluetooth permission denied"
+            val serviceIntent = Intent(this, BleCallService::class.java).apply {
+                action = BleCallService.ACTION_START
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            statusLabel.text = "Background BLE service started. Watch the persistent notification for connection status."
+            toast("BLE connection service started")
+        } catch (e: Exception) {
+            statusLabel.text = "Could not start BLE service: " + (e.message ?: e.javaClass.simpleName)
         }
     }
 
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val advertisedServices = result.scanRecord?.serviceUuids ?: emptyList()
-            if (advertisedServices.any { it.uuid == BleConfig.SERVICE_UUID }) {
-                runOnUiThread {
-                    try {
-                        adapter?.bluetoothLeScanner?.stopScan(this)
-                        status.text = "Status: connecting to " + (result.device.name ?: result.device.address)
-                        bluetoothGatt?.close()
-                        bluetoothGatt = result.device.connectGatt(this@MainActivity, false, gattCallback)
-                    } catch (_: SecurityException) {
-                        status.text = "Status: Bluetooth permission denied"
-                    }
-                }
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == requestBlePermissionsCode) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startBackgroundBleService()
+            } else {
+                toast("Bluetooth permission is needed to connect to the ESP32-S3")
+            }
+        } else if (requestCode == requestCallPermissionCode) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                toast("Phone permission granted. Tap Auto-call again to enable it.")
+            } else {
+                toast("Phone permission denied; calls will not be placed")
             }
         }
-
-        override fun onScanFailed(errorCode: Int) {
-            runOnUiThread { status.text = "Status: scan failed ($errorCode)" }
-        }
-    }
-
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, statusCode: Int, newState: Int) {
-            if (statusCode == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
-                bluetoothGatt = gatt
-                try {
-                    gatt.discoverServices()
-                } catch (_: SecurityException) {
-                    runOnUiThread { status.text = "Status: Bluetooth permission denied" }
-                }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                runOnUiThread {
-                    status.text = "Status: disconnected"
-                    commandCharacteristic = null
-                }
-                gatt.close()
-                if (bluetoothGatt == gatt) bluetoothGatt = null
-            }
-        }
-
-        override fun onServicesDiscovered(gatt: BluetoothGatt, statusCode: Int) {
-            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
-                runOnUiThread { status.text = "Status: service discovery failed ($statusCode)" }
-                return
-            }
-            val service = gatt.getService(BleConfig.SERVICE_UUID)
-            val characteristic = service?.getCharacteristic(BleConfig.COMMAND_UUID)
-            commandCharacteristic = characteristic
-            if (characteristic == null) {
-                runOnUiThread { status.text = "Status: BLE service/command characteristic not found" }
-                return
-            }
-            enableCommandNotifications(gatt, characteristic)
-        }
-
-        @Suppress("DEPRECATION")
-        private fun enableCommandNotifications(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            val properties = characteristic.properties
-            val canNotify = properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0
-            val canIndicate = properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
-            if (!canNotify && !canIndicate) {
-                runOnUiThread { status.text = "Status: command characteristic does not support notify/indicate" }
-                return
-            }
-
-            try {
-                if (!gatt.setCharacteristicNotification(characteristic, true)) {
-                    runOnUiThread { status.text = "Status: could not enable BLE notifications" }
-                    return
-                }
-                val descriptor = characteristic.getDescriptor(CCCD_UUID)
-                if (descriptor == null) {
-                    runOnUiThread { status.text = "Status: notification descriptor missing on ESP32" }
-                    return
-                }
-                val value = if (canNotify) {
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                } else {
-                    BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                }
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    val result = gatt.writeDescriptor(descriptor, value)
-                    if (result != BluetoothStatusCodes.SUCCESS) {
-                        runOnUiThread { status.text = "Status: could not subscribe to BLE notifications ($result)" }
-                    }
-                } else {
-                    descriptor.value = value
-                    if (!gatt.writeDescriptor(descriptor)) {
-                        runOnUiThread { status.text = "Status: could not subscribe to BLE notifications" }
-                    }
-                }
-            } catch (_: SecurityException) {
-                runOnUiThread { status.text = "Status: Bluetooth permission denied" }
-            }
-        }
-
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            statusCode: Int
-        ) {
-            if (descriptor.uuid == CCCD_UUID) {
-                runOnUiThread {
-                    status.text = if (statusCode == BluetoothGatt.GATT_SUCCESS) {
-                        "Status: connected — waiting for CALL command"
-                    } else {
-                        "Status: BLE notification subscription failed ($statusCode)"
-                    }
-                }
-            }
-        }
-
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            handleBleBytes(characteristic.value ?: return)
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            handleBleBytes(value)
-        }
-    }
-
-    private fun handleBleBytes(value: ByteArray) {
-        val command = value.toString(Charsets.UTF_8).trim()
-        runOnUiThread { handleCommand(command) }
-    }
-
-    private fun handleCommand(command: String) {
-        status.text = "Last command: $command"
-        if (!command.startsWith("CALL:", ignoreCase = true)) {
-            status.append("\nIgnored: unknown command")
-            return
-        }
-        val number = normalizeNumber(command.substringAfter(":"))
-        if (!isValidNumber(number)) {
-            status.append("\nIgnored: invalid number")
-            return
-        }
-        if (number !in trustedNumbers) {
-            status.append("\nIgnored: number is not in trusted list")
-            return
-        }
-        if (!autoCall) {
-            status.append("\nAuto-call is OFF; no call placed")
-            return
-        }
-        placeCall(number)
     }
 
     private fun placeCall(number: String) {
         if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            status.append("\nPhone permission missing; grant it in Android settings")
-            requestCallPermissionIfNeeded()
+            requestPermissions(arrayOf(Manifest.permission.CALL_PHONE), requestCallPermissionCode)
             return
         }
         try {
-            startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")))
-            status.append("\nCalling $number")
+            val telecom = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            telecom.placeCall(Uri.fromParts("tel", number, null), Bundle())
+            toast("Call requested: $number")
         } catch (e: Exception) {
-            status.append("\nCall could not start: " + (e.message ?: e.javaClass.simpleName))
+            toast("Call could not start: " + (e.message ?: e.javaClass.simpleName))
         }
     }
 
-    override fun onDestroy() {
-        try {
-            bluetoothGatt?.close()
-        } catch (_: SecurityException) {
+    override fun onResume() {
+        super.onResume()
+        autoCall = prefs.getBoolean("autocall", false)
+        if (::autoCallButton.isInitialized) {
+            autoCallButton.text = if (autoCall) "Auto-call: ON" else "Auto-call: OFF"
         }
-        bluetoothGatt = null
-        super.onDestroy()
+        if (::trustedLabel.isInitialized) refreshTrustedLabel()
     }
 
     private fun toast(message: String) =
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-
-    companion object {
-        private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
 }
