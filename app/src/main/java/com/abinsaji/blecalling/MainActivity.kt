@@ -312,7 +312,10 @@ class MainActivity : Activity() {
         }
         try {
             val telecom = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            telecom.placeCall(Uri.fromParts("tel", number, null), Bundle())
+            val callExtras = Bundle().apply {
+                putBoolean(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, true)
+            }
+            telecom.placeCall(Uri.fromParts("tel", number, null), callExtras)
             toast("Call requested: $number")
         } catch (e: Exception) {
             toast("Call could not start: " + (e.message ?: e.javaClass.simpleName))
