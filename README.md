@@ -39,3 +39,8 @@ ESP32-S3 supports Bluetooth Low Energy (BLE), not Bluetooth Classic SPP. Use BLE
 
 ## Location permission
 The app does not request or use the phone's location permission. On Android 8–11, it uses Android Companion Device Manager's system picker for the initial ESP32-S3 selection, then connects to the saved BLE address. Android may still require the system Location Services switch to be enabled for Companion Device Manager scanning, but the app does not receive location permission. On Android 12+, the app requests only Nearby Devices permissions for BLE scanning/connection.
+
+
+## Arduino BLECalling library
+
+The arduino-library/BLECalling folder contains a reusable ESP32 / ESP32-S3 Arduino library. Add it to your Arduino libraries folder and use ble_calling(number) from the main sketch. See the [library README](arduino-library/BLECalling/README.md).
